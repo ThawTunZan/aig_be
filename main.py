@@ -129,3 +129,16 @@ def report_message(req: BadResponse):
         return {"status": "Report received",}
     except Exception as e:
         return {"status": f"Error: {str(e)}"}
+
+@app.get("/get_bot_config", status_code=200)
+def get_bot_config():
+    json_data = load_json_db()
+    return json_data
+
+@app.post("/save_bot_config", status_code=201)
+def save_bot_config(req: BotSettings):
+    json_data = load_json_db()
+    json_data["knowledge_base"] =req.knowledge_base
+    json_data["guidelines"] = req.additional_guidelines
+    save_json_db(json_data)
+    return {"status": "Bot settings updated successfully!"}
