@@ -64,7 +64,7 @@ def send_message(req: ChatRequest):
         ADDITIONAL GUIDELINES: {json_data["guidelines"]}
         """
         model = genai.GenerativeModel(
-            model_name='gemini-2.5-flash',
+            model_name='gemini-2.5-flash-lite',
             tools=[get_application_status, get_card_transaction_status],
             system_instruction=dynamic_system_prompt
         )
@@ -74,6 +74,8 @@ def send_message(req: ChatRequest):
         active_chat_sessions[req.session_id] = chat_session.history
         return {"reply": response.text}
     except Exception as e:
+        if "429" in str(e) or response.status_code == 429 or "Too Many Requests" in str(e):
+            return {"reply": "Sorry, I'm currently overloaded. Please try again later."}
         return {"reply": f"Sorry I encountered a problem {str(e)}"}
     
 class BotSettings(BaseModel):
@@ -103,7 +105,7 @@ class BadResponse(BaseModel):
 def report_message(req: BadResponse):
     # Here you would typically save this to a database or send it to a monitoring service
     try:
-        auditor_model = genai.GenerativeModel(model_name='gemini-2.5-flash')
+        auditor_model = genai.GenerativeModel(model_name='gemini-2.5-flash-lite')
         audit_prompt = f"""
         You are an AI system auditor. 
         Read this chat history: {req.past_messages}
