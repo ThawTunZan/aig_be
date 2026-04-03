@@ -64,7 +64,7 @@ def send_message(req: ChatRequest):
         ADDITIONAL GUIDELINES: {json_data["guidelines"]}
         """
         model = genai.GenerativeModel(
-            model_name='gemini-2.5-flash-lite',
+            model_name='gemini-3.1-flash-lite',
             tools=[get_application_status, get_card_transaction_status],
             system_instruction=dynamic_system_prompt
         )
@@ -105,7 +105,7 @@ class BadResponse(BaseModel):
 def report_message(req: BadResponse):
     # Here you would typically save this to a database or send it to a monitoring service
     try:
-        auditor_model = genai.GenerativeModel(model_name='gemini-2.5-flash-lite')
+        auditor_model = genai.GenerativeModel(model_name='gemini-3.1-flash-lite')
         audit_prompt = f"""
         You are an AI system auditor. 
         Read this chat history: {req.past_messages}
