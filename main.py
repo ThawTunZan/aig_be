@@ -1,5 +1,5 @@
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import google.generativeai as genai
@@ -15,10 +15,10 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins = ["*"],
-    allow_headers = ["*"], 
-    allow_methods = ["*"],
-    allow_credentials = True,
+    allow_origins=["http://localhost:3005", "http://127.0.0.1:3005", "https://aig-fe-lake.vercel.app"], 
+    allow_headers=["*"], 
+    allow_methods=["*"],
+    allow_credentials=True,
 )
 
 api_key = os.environ.get("GEMINI_API_KEY", "")
@@ -133,15 +133,23 @@ def report_message(req: BadResponse):
     except Exception as e:
         return {"status": f"Error: {str(e)}"}
 
+class User (BaseModel):
+    username:str
+    role: str
+
 @app.get("/get_bot_config", status_code=200)
-def get_bot_config():
-    json_data = load_json_db()
-    return json_data
+def get_bot_config(userId:str, role:str):
+    if userId == "manager":
+        return load_json_db()
+    raise HTTPException(status_code=401, detail="Unauthorized")
+
 
 @app.post("/save_bot_config", status_code=201)
-def save_bot_config(req: BotSettings):
-    json_data = load_json_db()
-    json_data["knowledge_base"] =req.knowledge_base
-    json_data["guidelines"] = req.additional_guidelines
-    save_json_db(json_data)
-    return {"status": "Bot settings updated successfully!"}
+def save_bot_config(req: BotSettings, userId:str, role:str):
+    if userId == "manager":
+        json_data = load_json_db()
+        json_data["knowledge_base"] =req.knowledge_base
+        json_data["guidelines"] = req.additional_guidelines
+        save_json_db(json_data)
+        return {"status": "Bot settings updated successfully!"}
+    raise HTTPException(status_code=401, detail="Unauthorized!")
