@@ -93,3 +93,7 @@ staticfiles/
 media/
 tmp/
 temp/
+
+.agents/
+.claude/
+skills-lock.json

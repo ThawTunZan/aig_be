@@ -15,3 +15,9 @@ urllib3==2.6.3
 uvicorn
 google-generativeai
 python-dotenv
+bs4
+psycopg2-binary
+passlib
+bcrypt<4.0.0
+PyJWT
+python-multipart
