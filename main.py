@@ -1,10 +1,12 @@
 import os
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form, Depends
+import json
+from dotenv import load_dotenv
+from fastapi import Body, FastAPI, HTTPException, UploadFile, File, Form, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import certifi
 import google.generativeai as genai
-from dotenv import load_dotenv
-import json
+
 import uuid
 from bs4 import BeautifulSoup
 import requests
@@ -16,17 +18,28 @@ from psycopg2.extras import RealDictCursor
 from passlib.context import CryptContext
 import jwt
 from datetime import datetime, timedelta
+from pymongo.mongo_client import MongoClient
+from pymongo.server_api import ServerApi
+
 # to be changed ltr
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-
-DB_FILE = "bot_data.json"
 
 load_dotenv()
 api_key = os.environ.get("GEMINI_API_KEY", "")
 DB_URL = os.environ.get("DB_CONNECTION_URL", "")
+MG_DB_URL = os.environ.get("MG_DB_URL", "")
 
 
 app = FastAPI()
+
+class BotSettings(BaseModel):
+    knowledge_base:str
+    additional_guidelines:str
+
+
+class BadResponse(BaseModel):
+    past_messages:str
+    bad_message: str
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -43,19 +56,6 @@ genai.configure(api_key=api_key)
 
 active_chat_sessions = {}
 
-def load_json_db():
-    if not os.path.exists(DB_FILE):
-        return {
-            "knowledge_base": "Atome Card is a payment card. Applications take 3-5 days to process.",
-            "guidelines": "Always be extremely polite and empathetic. If a transaction fails, apologize.",
-            "mistakes": []
-        }
-    with open(DB_FILE, "r") as f:
-        return json.load(f)
-def save_json_db(data):
-    with open(DB_FILE, "w") as f:
-        json.dump(data, f, indent=4)
-
 def get_application_status(application_id: str):
     # Mock behavior
     return {"status": "Pending Verification", "application_id": application_id}
@@ -71,14 +71,87 @@ class ChatRequest(BaseModel):
 def get_health():
     return {"health": "OK"}
 
+@app.get("/get_bot_config", status_code=200)
+def get_bot_config(userId: str, role: str):
+    if userId != "manager":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+        
+    try:
+        client = MongoClient(
+            MG_DB_URL, 
+            server_api=ServerApi('1'), 
+            tlsCAFile=certifi.where()
+        )
+        database = client["aigDB"]
+        collection = database["botConfigs"]
+        
+        config = collection.find_one({}, {"_id": 0}) 
+        client.close()
+        
+        if config:
+            return config
+        else:
+            return {
+                "knowledge_base": "Add your knowledge base here...",
+                "guidelines": "Add your guidelines here...",
+                "mistakes": []
+            }
+            
+    except Exception as e:
+        print(f"GET CONFIG ERROR: {e}")
+        return {"status": f"Error: {str(e)}"}
+
+
+@app.post("/save_bot_config", status_code=201)
+def save_bot_config(userId: str, role: str, req: BotSettings=Body(...)):
+    if userId != "manager":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+        
+    try:
+        client = MongoClient(
+            MG_DB_URL, 
+            server_api=ServerApi('1'), 
+            tlsCAFile=certifi.where()
+        )
+        database = client["aigDB"]
+        collection = database["botConfigs"]
+
+        update_fields = {}
+        if req.knowledge_base:
+            update_fields["knowledge_base"] = req.knowledge_base
+        if req.additional_guidelines:
+            update_fields["guidelines"] = req.additional_guidelines
+            
+        if update_fields:
+            collection.update_one({}, {"$set": update_fields}, upsert=True)
+
+        client.close()
+        return {"status": "Bot settings updated successfully!"}
+        
+    except Exception as e:
+        print(f"SAVE CONFIG ERROR: {e}")
+        return {"status": f"Error: {str(e)}"}
+    
 @app.post("/chat", status_code=201)
 def send_message(req: ChatRequest):
+    client = None
     try:
-        json_data = load_json_db()
+        client = MongoClient(
+            MG_DB_URL, 
+            server_api=ServerApi('1'), 
+            tlsCAFile=certifi.where()
+        )
+        database = client["aigDB"]
+        collection = database["botConfigs"]
+        
+        config = collection.find_one({}) or {}
+        kb = config.get("knowledge_base", "")
+        gl = config.get("guidelines", "")
+
         dynamic_system_prompt = f"""
         You are a helpful customer service AI bot for Atome.
-        KNOWLEDGE BASE: {json_data["knowledge_base"]}
-        ADDITIONAL GUIDELINES: {json_data["guidelines"]}
+        KNOWLEDGE BASE: {kb}
+        ADDITIONAL GUIDELINES: {gl}
         """
         model = genai.GenerativeModel(
             model_name='gemini-3.1-flash-lite-preview',
@@ -95,29 +168,10 @@ def send_message(req: ChatRequest):
         if "429" in error_msg or "Too Many Requests" in error_msg or "ResourceExhausted" in error_msg:
             return {"reply": "Sorry, I'm currently overloaded. Please try again later."}
         return {"reply": f"Sorry I encountered a problem: {error_msg}"}
-    
-class BotSettings(BaseModel):
-    knowledge_base:str
-    additional_guidelines:str
+    finally:
+        if client:
+            client.close()
 
-@app.post("/update_bot", status_code=201)
-def update_bot(req: BotSettings):
-    try:
-        json_data = load_json_db()
-
-        if req.knowledge_base:
-            json_data["knowledge_base"] = req.knowledge_base
-        if req.additional_guidelines:
-            json_data["guidelines"] = req.additional_guidelines
-            
-        save_json_db(json_data)
-        return {"status": "Bot settings updated successfully!"}
-    except Exception as e:
-        return {"status": f"Error: {str(e)}"}
-
-class BadResponse(BaseModel):
-    past_messages:str
-    bad_message: str
 
 @app.post("/report_message", status_code=201)
 def report_message(req: BadResponse):
@@ -137,14 +191,32 @@ def report_message(req: BadResponse):
         response = auditor_model.generate_content(audit_prompt)
         new_rule = response.text.strip()
 
-        json_data = load_json_db()
-        json_data["guidelines"] += f"\n {new_rule}"
-        mistake_entry = {
-            "bad_message": req.bad_message,
-            "fix": new_rule
-        }
-        json_data["mistakes"].append(mistake_entry)
-        save_json_db(json_data)
+        client = MongoClient(
+            MG_DB_URL, 
+            server_api=ServerApi('1'), 
+            tlsCAFile=certifi.where()
+        )
+        database = client["aigDB"]
+        collection = database["botConfigs"]
+
+        config = collection.find_one({})
+        
+        if config:
+            new_guidelines = config.get("guidelines", "") + f"\n {new_rule}"
+            mistake_entry = {
+                "bad_message": req.bad_message,
+                "fix": new_rule
+            }
+            collection.update_one(
+                {},
+                {
+                    "$set": {"guidelines": new_guidelines},
+                    "$push": {"mistakes": mistake_entry}
+                }
+            )
+            
+        client.close()
+
         return {"status": "Report received",}
     except Exception as e:
         return {"status": f"Error: {str(e)}"}
@@ -153,35 +225,26 @@ class User (BaseModel):
     username:str
     role: str
 
-@app.get("/get_bot_config", status_code=200)
-def get_bot_config(userId:str, role:str):
-    if userId == "manager":
-        return load_json_db()
-    raise HTTPException(status_code=401, detail="Unauthorized")
-
-
-@app.post("/save_bot_config", status_code=201)
-def save_bot_config(req: BotSettings, userId:str, role:str):
-    if userId == "manager":
-        json_data = load_json_db()
-        json_data["knowledge_base"] =req.knowledge_base
-        json_data["guidelines"] = req.additional_guidelines
-        save_json_db(json_data)
-        return {"status": "Bot settings updated successfully!"}
-    raise HTTPException(status_code=401, detail="Unauthorized!")
-
-
-
 @app.post("/meta_chat", status_code=201)
 async def meta_chat(
     message: str = Form(...), 
     file: UploadFile = File(None)
 ):
+    client = None
     try:
+        client = MongoClient(
+            MG_DB_URL, 
+            server_api=ServerApi('1'), 
+            tlsCAFile=certifi.where()
+        )
+        database = client["aigDB"]
+        collection = database["botConfigs"]
+
         doc_text = ""
-        current_data = load_json_db()
+        current_data = collection.find_one({}) or {}
         current_kb = current_data.get("knowledge_base", "")
         current_gl = current_data.get("guidelines", "")
+        
         if file:
             content = await file.read()
             doc_text = content.decode("utf-8")
@@ -219,18 +282,25 @@ async def meta_chat(
         )
         
         response = meta_model.generate_content(message)
-        
         new_config = json.loads(response.text)
         
-        json_data = load_json_db()
-        json_data["knowledge_base"] = new_config["knowledge_base"]
-        json_data["guidelines"] = new_config["guidelines"]
-        save_json_db(json_data)
+        collection.update_one(
+            {},
+            {
+                "$set": {
+                    "knowledge_base": new_config.get("knowledge_base", ""),
+                    "guidelines": new_config.get("guidelines", "")
+                }
+            }
+        )
 
-        return {"reply": new_config["reply_to_manager"]}
+        return {"reply": new_config.get("reply_to_manager", "")}
 
     except Exception as e:
         return {"reply": f"Error building agent: {str(e)}"}
+    finally:
+        if client:
+            client.close()
     
 class UrlRequest(BaseModel):
     url: str
