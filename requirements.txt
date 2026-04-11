@@ -21,4 +21,4 @@ passlib
 bcrypt<4.0.0
 PyJWT
 python-multipart
-pymongo
+pymongosqlalchemy
