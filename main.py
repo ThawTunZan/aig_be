@@ -3,7 +3,7 @@ import json
 from dotenv import load_dotenv
 from fastapi import Body, FastAPI, HTTPException, UploadFile, File, Form, Depends
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import certifi
 import google.generativeai as genai
 
@@ -358,8 +358,8 @@ def update_knowledge_base(req: UrlRequest, userId: str, role: str):
     
 
 class UserLogin (BaseModel):
-    username:str
-    password:str
+    username:str = Field(..., min_length=5, description="Username must be at least 5 characters long")
+    password:str = Field(..., min_length=8, description="Password must be at least 8 characters long")
     role: str
 
 @app.post("/login", status_code=201)
