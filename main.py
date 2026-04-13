@@ -388,8 +388,6 @@ def login(user: UserLogin):
     except HTTPException:
         raise HTTPException(status_code=401, detail="Unauthorized")
     except Exception as e:
-        raise 
-    except Exception as e:
         print(f"\n--- LOGIN ERROR: {str(e)} ---\n")
         raise HTTPException(status_code=500, detail="Internal server error")
     finally:
