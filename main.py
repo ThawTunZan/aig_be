@@ -310,6 +310,7 @@ def update_knowledge_base(req: UrlRequest, userId: str, role: str):
     if userId != "manager":
         raise HTTPException(status_code=401, detail="Unauthorized")
     
+    client = None
     try:
         response = requests.get(req.url, timeout=10, verify=False)
         response.raise_for_status()
@@ -342,9 +343,22 @@ def update_knowledge_base(req: UrlRequest, userId: str, role: str):
             except:
                 continue
 
-        json_data = load_json_db()
-        json_data["knowledge_base"] = f"Data automatically scraped from {req.url}:\n\n{combined_text}"
-        save_json_db(json_data)
+        # --- MongoDB Implementation instead of JSON ---
+        client = MongoClient(
+            MG_DB_URL, 
+            server_api=ServerApi('1'), 
+            tlsCAFile=certifi.where()
+        )
+        database = client["aigDB"]
+        collection = database["botConfigs"]
+
+        new_knowledge_base = f"Data automatically scraped from {req.url}:\n\n{combined_text}"
+        
+        collection.update_one(
+            {}, 
+            {"$set": {"knowledge_base": new_knowledge_base}}, 
+            upsert=True
+        )
 
         return {
             "status": "Success", 
@@ -355,8 +369,10 @@ def update_knowledge_base(req: UrlRequest, userId: str, role: str):
         return {"status": "Error", "message": f"Failed to fetch URL: {str(e)}"}
     except Exception as e:
         return {"status": "Error", "message": f"An unexpected error occurred: {str(e)}"}
+    finally:
+        if client:
+            client.close()
     
-
 class UserLogin (BaseModel):
     username:str = Field(..., min_length=5, description="Username must be at least 5 characters long")
     password:str = Field(..., min_length=8, description="Password must be at least 8 characters long")
@@ -384,10 +400,11 @@ def login(user: UserLogin):
             "username": db_res['username'],
             "role": db_res['roles']
         }
-
-    except HTTPException:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+    except HTTPException as e:
+        # If we explicitly raised a 401 earlier, just throw it back up to the frontend
+        raise e
     except Exception as e:
+        # Catch any actual bugs (like DB offline, bad query) and return a 500
         print(f"\n--- LOGIN ERROR: {str(e)} ---\n")
         raise HTTPException(status_code=500, detail="Internal server error")
     finally:
