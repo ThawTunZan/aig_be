@@ -6,6 +6,25 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import certifi
 import google.generativeai as genai
+from contextlib import asynccontextmanager
+import time
+
+# Global variable for MongoDB client
+mongodb_client = None
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global mongodb_client
+    mongodb_client = MongoClient(
+        MG_DB_URL, 
+        server_api=ServerApi('1'), 
+        tlsCAFile=certifi.where()
+    )
+    yield
+    mongodb_client.close()
+
+# Update your FastAPI instantiation to use it:
+app = FastAPI(lifespan=lifespan)
 
 import uuid
 from bs4 import BeautifulSoup
@@ -30,23 +49,22 @@ DB_URL = os.environ.get("DB_CONNECTION_URL", "")
 MG_DB_URL = os.environ.get("MG_DB_URL", "")
 
 
-app = FastAPI()
-
 class BotSettings(BaseModel):
-    knowledge_base:str
-    additional_guidelines:str
+    knowledge_base: str
+    additional_guidelines: str
 
 
 class BadResponse(BaseModel):
-    past_messages:str
+    past_messages: str
     bad_message: str
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3005", "http://127.0.0.1:3005", "https://aig-fe-lake.vercel.app"], 
-    allow_headers=["*"], 
+    allow_origins=["http://localhost:3005", "http://127.0.0.1:3005", "https://aig-fe-lake.vercel.app"],
+    allow_headers=["*"],
     allow_methods=["*"],
     allow_credentials=True,
 )
@@ -65,7 +83,7 @@ def get_card_transaction_status(transaction_id: str):
 
 class ChatRequest(BaseModel):
     message: str
-    session_id:str
+    session_id: str
 
 @app.get("/health", status_code=200)
 def get_health():
@@ -77,16 +95,11 @@ def get_bot_config(userId: str, role: str):
         raise HTTPException(status_code=401, detail="Unauthorized")
         
     try:
-        client = MongoClient(
-            MG_DB_URL, 
-            server_api=ServerApi('1'), 
-            tlsCAFile=certifi.where()
-        )
-        database = client["aigDB"]
+        # Use global client
+        database = mongodb_client["aigDB"]
         collection = database["botConfigs"]
         
         config = collection.find_one({}, {"_id": 0}) 
-        client.close()
         
         if config:
             return config
@@ -108,12 +121,7 @@ def save_bot_config(userId: str, role: str, req: BotSettings=Body(...)):
         raise HTTPException(status_code=401, detail="Unauthorized")
         
     try:
-        client = MongoClient(
-            MG_DB_URL, 
-            server_api=ServerApi('1'), 
-            tlsCAFile=certifi.where()
-        )
-        database = client["aigDB"]
+        database = mongodb_client["aigDB"]
         collection = database["botConfigs"]
 
         update_fields = {}
@@ -125,7 +133,6 @@ def save_bot_config(userId: str, role: str, req: BotSettings=Body(...)):
         if update_fields:
             collection.update_one({}, {"$set": update_fields}, upsert=True)
 
-        client.close()
         return {"status": "Bot settings updated successfully!"}
         
     except Exception as e:
@@ -134,19 +141,17 @@ def save_bot_config(userId: str, role: str, req: BotSettings=Body(...)):
     
 @app.post("/chat", status_code=201)
 def send_message(req: ChatRequest):
-    client = None
+    start_time = time.time()
     try:
-        client = MongoClient(
-            MG_DB_URL, 
-            server_api=ServerApi('1'), 
-            tlsCAFile=certifi.where()
-        )
-        database = client["aigDB"]
+        # Use the global mongodb_client instead of creating a new one
+        database = mongodb_client["aigDB"]
         collection = database["botConfigs"]
         
         config = collection.find_one({}) or {}
         kb = config.get("knowledge_base", "")
         gl = config.get("guidelines", "")
+        
+        print(f"MongoDB took: {time.time() - start_time:.2f} seconds")
 
         dynamic_system_prompt = f"""
         You are a helpful customer service AI bot for Atome.
@@ -160,7 +165,13 @@ def send_message(req: ChatRequest):
         )
         chat_session = model.start_chat(enable_automatic_function_calling=True, history=active_chat_sessions.get(req.session_id, []))
 
+        gemini_start = time.time()
+        print("Waiting for Gemini API to reply...")
+        
         response = chat_session.send_message(req.message)
+        
+        print(f"Gemini API took: {time.time() - gemini_start:.2f} seconds")
+        
         active_chat_sessions[req.session_id] = chat_session.history
         return {"reply": response.text}
     except Exception as e:
@@ -169,8 +180,7 @@ def send_message(req: ChatRequest):
             return {"reply": "Sorry, I'm currently overloaded. Please try again later."}
         return {"reply": f"Sorry I encountered a problem: {error_msg}"}
     finally:
-        if client:
-            client.close()
+        pass
 
 
 @app.post("/report_message", status_code=201)
@@ -191,12 +201,7 @@ def report_message(req: BadResponse):
         response = auditor_model.generate_content(audit_prompt)
         new_rule = response.text.strip()
 
-        client = MongoClient(
-            MG_DB_URL, 
-            server_api=ServerApi('1'), 
-            tlsCAFile=certifi.where()
-        )
-        database = client["aigDB"]
+        database = mongodb_client["aigDB"]
         collection = database["botConfigs"]
 
         config = collection.find_one({})
@@ -214,8 +219,6 @@ def report_message(req: BadResponse):
                     "$push": {"mistakes": mistake_entry}
                 }
             )
-            
-        client.close()
 
         return {"status": "Report received",}
     except Exception as e:
@@ -230,14 +233,8 @@ async def meta_chat(
     message: str = Form(...), 
     file: UploadFile = File(None)
 ):
-    client = None
     try:
-        client = MongoClient(
-            MG_DB_URL, 
-            server_api=ServerApi('1'), 
-            tlsCAFile=certifi.where()
-        )
-        database = client["aigDB"]
+        database = mongodb_client["aigDB"]
         collection = database["botConfigs"]
 
         doc_text = ""
@@ -298,9 +295,6 @@ async def meta_chat(
 
     except Exception as e:
         return {"reply": f"Error building agent: {str(e)}"}
-    finally:
-        if client:
-            client.close()
     
 class UrlRequest(BaseModel):
     url: str
@@ -310,7 +304,6 @@ def update_knowledge_base(req: UrlRequest, userId: str, role: str):
     if userId != "manager":
         raise HTTPException(status_code=401, detail="Unauthorized")
     
-    client = None
     try:
         response = requests.get(req.url, timeout=10, verify=False)
         response.raise_for_status()
@@ -344,12 +337,7 @@ def update_knowledge_base(req: UrlRequest, userId: str, role: str):
                 continue
 
         # --- MongoDB Implementation instead of JSON ---
-        client = MongoClient(
-            MG_DB_URL, 
-            server_api=ServerApi('1'), 
-            tlsCAFile=certifi.where()
-        )
-        database = client["aigDB"]
+        database = mongodb_client["aigDB"]
         collection = database["botConfigs"]
 
         new_knowledge_base = f"Data automatically scraped from {req.url}:\n\n{combined_text}"
@@ -370,8 +358,7 @@ def update_knowledge_base(req: UrlRequest, userId: str, role: str):
     except Exception as e:
         return {"status": "Error", "message": f"An unexpected error occurred: {str(e)}"}
     finally:
-        if client:
-            client.close()
+        pass
     
 class UserLogin (BaseModel):
     username:str = Field(..., min_length=5, description="Username must be at least 5 characters long")
