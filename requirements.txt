@@ -9,7 +9,7 @@ urllib3
 sqlalchemy
 psycopg2-binary
 passlib
-bcrypt
+bcrypt<4.0.0
 PyJWT
 python-multipart
 pymongo[srv]
