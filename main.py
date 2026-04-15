@@ -5,11 +5,11 @@ from fastapi import Body, FastAPI, HTTPException, UploadFile, File, Form, Depend
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import certifi
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from contextlib import asynccontextmanager
 import time
 
-# Global variable for MongoDB client
 mongodb_client = None
 
 @asynccontextmanager
@@ -23,7 +23,6 @@ async def lifespan(app: FastAPI):
     yield
     mongodb_client.close()
 
-# Update your FastAPI instantiation to use it:
 app = FastAPI(lifespan=lifespan)
 
 import uuid
@@ -48,6 +47,7 @@ api_key = os.environ.get("GEMINI_API_KEY", "")
 DB_URL = os.environ.get("DB_CONNECTION_URL", "")
 MG_DB_URL = os.environ.get("MG_DB_URL", "")
 
+genai_client = genai.Client(api_key=api_key)
 
 class BotSettings(BaseModel):
     knowledge_base: str
@@ -69,8 +69,6 @@ app.add_middleware(
     allow_credentials=True,
 )
 
-
-genai.configure(api_key=api_key)
 
 active_chat_sessions = {}
 
@@ -95,11 +93,10 @@ def get_bot_config(userId: str, role: str):
         raise HTTPException(status_code=401, detail="Unauthorized")
         
     try:
-        # Use global client
         database = mongodb_client["aigDB"]
         collection = database["botConfigs"]
-        
-        config = collection.find_one({}, {"_id": 0}) 
+
+        config = collection.find_one({}, {"_id": 0})
         
         if config:
             return config
@@ -140,65 +137,64 @@ def save_bot_config(userId: str, role: str, req: BotSettings=Body(...)):
         return {"status": f"Error: {str(e)}"}
     
 @app.post("/chat", status_code=201)
-def send_message(req: ChatRequest):
-    start_time = time.time()
+async def send_message(req: ChatRequest):
     try:
-        # Use the global mongodb_client instead of creating a new one
-        database = mongodb_client["aigDB"]
-        collection = database["botConfigs"]
-        
-        config = collection.find_one({}) or {}
-        kb = config.get("knowledge_base", "")
-        gl = config.get("guidelines", "")
-        
-        print(f"MongoDB took: {time.time() - start_time:.2f} seconds")
+        if req.session_id not in active_chat_sessions:
+            database = mongodb_client["aigDB"]
+            collection = database["botConfigs"]
+            config = collection.find_one({}) or {}
+            kb = config.get("knowledge_base", "")
+            gl = config.get("guidelines", "")
 
-        dynamic_system_prompt = f"""
-        You are a helpful customer service AI bot for Atome.
-        KNOWLEDGE BASE: {kb}
-        ADDITIONAL GUIDELINES: {gl}
-        """
-        model = genai.GenerativeModel(
-            model_name='gemini-3.1-flash-lite-preview',
-            tools=[get_application_status, get_card_transaction_status],
-            system_instruction=dynamic_system_prompt
-        )
-        chat_session = model.start_chat(enable_automatic_function_calling=True, history=active_chat_sessions.get(req.session_id, []))
+            dynamic_system_prompt = f"""
+            You are a helpful customer service AI bot for Atome.
+            KNOWLEDGE BASE: {kb}
+            ADDITIONAL GUIDELINES: {gl}
+            """
 
-        gemini_start = time.time()
-        print("Waiting for Gemini API to reply...")
-        
-        response = chat_session.send_message(req.message)
-        
-        print(f"Gemini API took: {time.time() - gemini_start:.2f} seconds")
-        
-        active_chat_sessions[req.session_id] = chat_session.history
+            chat = genai_client.aio.chats.create(
+                model='gemini-3.1-flash-lite-preview',
+                config=types.GenerateContentConfig(
+                    system_instruction=dynamic_system_prompt,
+                    tools=[get_application_status, get_card_transaction_status],
+                    temperature=0.7,
+                )
+            )
+            active_chat_sessions[req.session_id] = chat
+        else:
+            chat = active_chat_sessions[req.session_id]
+
+        response = await chat.send_message(req.message)
         return {"reply": response.text}
+
     except Exception as e:
         error_msg = str(e)
+        print(f"!!! ERROR: {error_msg}")
+        if "503" in error_msg or "UNAVAILABLE" in error_msg:
+            return {"reply": "The AI service is temporarily unavailable due to high demand. Please try again shortly."}
         if "429" in error_msg or "Too Many Requests" in error_msg or "ResourceExhausted" in error_msg:
             return {"reply": "Sorry, I'm currently overloaded. Please try again later."}
         return {"reply": f"Sorry I encountered a problem: {error_msg}"}
-    finally:
-        pass
 
 
 @app.post("/report_message", status_code=201)
 def report_message(req: BadResponse):
     try:
-        auditor_model = genai.GenerativeModel(model_name='gemini-3.1-flash-lite-preview')
         audit_prompt = f"""
-        You are an AI system auditor. 
+        You are an AI system auditor.
         Read this chat history: {req.past_messages}
-        
-        The customer flagged this specific message from the bot as a mistake or unhelpful: 
+
+        The customer flagged this specific message from the bot as a mistake or unhelpful:
         "{req.bad_message}"
-        
-        Figure out what the bot did wrong. Then, write a single, short, clear guideline (1-2 sentences) 
+
+        Figure out what the bot did wrong. Then, write a single, short, clear guideline (1-2 sentences)
         that should be added to the bot's system instructions so it never makes this mistake again.
         Do not apologize. ONLY output the new rule.
         """
-        response = auditor_model.generate_content(audit_prompt)
+        response = genai_client.models.generate_content(
+            model='gemini-3.1-flash-lite-preview',
+            contents=audit_prompt,
+        )
         new_rule = response.text.strip()
 
         database = mongodb_client["aigDB"]
@@ -272,13 +268,14 @@ async def meta_chat(
         - "guidelines": The complete, updated guidelines text.
         """
         
-        meta_model = genai.GenerativeModel(
-            model_name='gemini-3.1-flash-lite-preview',
-            system_instruction=meta_system_prompt,
-            generation_config={"response_mime_type": "application/json"}
+        response = genai_client.models.generate_content(
+            model='gemini-3.1-flash-lite-preview',
+            contents=message,
+            config=types.GenerateContentConfig(
+                system_instruction=meta_system_prompt,
+                response_mime_type="application/json",
+            )
         )
-        
-        response = meta_model.generate_content(message)
         new_config = json.loads(response.text)
         
         collection.update_one(
@@ -336,15 +333,12 @@ def update_knowledge_base(req: UrlRequest, userId: str, role: str):
             except:
                 continue
 
-        # --- MongoDB Implementation instead of JSON ---
         database = mongodb_client["aigDB"]
         collection = database["botConfigs"]
-
-        new_knowledge_base = f"Data automatically scraped from {req.url}:\n\n{combined_text}"
         
         collection.update_one(
             {}, 
-            {"$set": {"knowledge_base": new_knowledge_base}}, 
+            {"$set": {"knowledge_base": combined_text}}, 
             upsert=True
         )
 
@@ -388,10 +382,8 @@ def login(user: UserLogin):
             "role": db_res['roles']
         }
     except HTTPException as e:
-        # If we explicitly raised a 401 earlier, just throw it back up to the frontend
         raise e
     except Exception as e:
-        # Catch any actual bugs (like DB offline, bad query) and return a 500
         print(f"\n--- LOGIN ERROR: {str(e)} ---\n")
         raise HTTPException(status_code=500, detail="Internal server error")
     finally:
@@ -429,4 +421,3 @@ def signup(user:UserLogin):
             cursor.close()
         if conn:
             conn.close()
-
